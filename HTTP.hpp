@@ -76,11 +76,110 @@ namespace http
                 --b;
             return s.substr(a, b - a);
         }
+
         inline std::string ToLower(std::string s)
         {
             std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c)
                            { return std::tolower(c); });
             return s;
+        }
+
+        // URL解码：将%XX转换为原始字符
+        inline std::string UrlDecode(const std::string &encoded)
+        {
+            std::string decoded;
+            for (size_t i = 0; i < encoded.length(); ++i)
+            {
+                if (encoded[i] == '%' && i + 2 < encoded.length())
+                {
+                    std::string hex = encoded.substr(i + 1, 2);
+                    try
+                    {
+                        int val = std::stoi(hex, nullptr, 16);
+                        decoded += static_cast<char>(val);
+                        i += 2;
+                    }
+                    catch (...)
+                    {
+                        decoded += encoded[i];
+                    }
+                }
+                else if (encoded[i] == '+')
+                {
+                    decoded += ' ';
+                }
+                else
+                {
+                    decoded += encoded[i];
+                }
+            }
+            return decoded;
+        }
+
+        // URL编码：将特殊字符转换为%XX
+        inline std::string UrlEncode(const std::string &str)
+        {
+            std::string encoded;
+            for (unsigned char c : str)
+            {
+                if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+                {
+                    encoded += c;
+                }
+                else
+                {
+                    encoded += '%';
+                    char buf[3];
+                    snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned char>(c));
+                    encoded += buf;
+                }
+            }
+            return encoded;
+        }
+
+        // 简单的JSON转义
+        inline std::string JsonEscape(const std::string &str)
+        {
+            std::string escaped;
+            for (char c : str)
+            {
+                switch (c)
+                {
+                case '"':
+                    escaped += "\\\"";
+                    break;
+                case '\\':
+                    escaped += "\\\\";
+                    break;
+                case '\b':
+                    escaped += "\\b";
+                    break;
+                case '\f':
+                    escaped += "\\f";
+                    break;
+                case '\n':
+                    escaped += "\\n";
+                    break;
+                case '\r':
+                    escaped += "\\r";
+                    break;
+                case '\t':
+                    escaped += "\\t";
+                    break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        char buf[7];
+                        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                        escaped += buf;
+                    }
+                    else
+                    {
+                        escaped += c;
+                    }
+                }
+            }
+            return escaped;
         }
     }
 
@@ -93,7 +192,10 @@ namespace http
         std::string version = "HTTP/1.1";
         std::unordered_map<std::string, std::string> headers;
         std::string body;
+        mutable std::unordered_map<std::string, std::string> query_params; // 缓存的查询参数
+        mutable bool query_params_parsed_ = false; // 查询参数是否已解析
 
+        // 获取HTTP请求头，支持大小写不敏感的查找
         std::optional<std::string> GetHeader(const std::string &key) const
         {
             auto it = headers.find(key);
@@ -107,12 +209,71 @@ namespace http
             return std::nullopt;
         }
 
-        static std::optional<Request> Parse(const std::string &raw)
+        // 解析查询参数（URL中?后的部分）
+        void ParseQueryParams() const
+        {
+            if (query_params_parsed_)
+                return;
+
+            query_params.clear();
+            if (query.empty())
+            {
+                query_params_parsed_ = true;
+                return;
+            }
+
+            // 按&分割参数对
+            size_t start = 0;
+            while (start < query.length())
+            {
+                size_t end = query.find('&', start);
+                if (end == std::string::npos)
+                    end = query.length();
+
+                std::string param = query.substr(start, end - start);
+                size_t eq = param.find('=');
+
+                if (eq != std::string::npos)
+                {
+                    std::string key = detail::UrlDecode(param.substr(0, eq));
+                    std::string value = detail::UrlDecode(param.substr(eq + 1));
+                    query_params[key] = value;
+                }
+                else
+                {
+                    std::string key = detail::UrlDecode(param);
+                    query_params[key] = "";
+                }
+
+                start = end + 1;
+            }
+
+            query_params_parsed_ = true;
+        }
+
+        // 获取查询参数
+        std::optional<std::string> GetQueryParam(const std::string &key) const
+        {
+            ParseQueryParams();
+            auto it = query_params.find(key);
+            if (it != query_params.end())
+                return it->second;
+            return std::nullopt;
+        }
+
+        // 获取所有查询参数
+        const std::unordered_map<std::string, std::string> &GetQueryParams() const
+        {
+            ParseQueryParams();
+            return query_params;
+        }
+
+        static std::optional<Request> Parse(const std::string &raw) // 为什么有static? 因为这个函数不依赖于Request的实例，可以直接通过Request::Parse来调用，而不需要先创建一个Request对象。
         {
             Request req;    
             size_t sep = raw.find("\r\n\r\n");
             std::string head = (sep == std::string::npos) ? raw : raw.substr(0, sep);
-            req.body = (sep == std::string::npos) ? std::string() : raw.substr(sep + 4);
+            req.body = (sep == std::string::npos) ? std::string() : raw.substr(sep + 4); 
 
             std::istringstream ss(head);
             std::string line;
@@ -152,7 +313,7 @@ namespace http
                 size_t colon = line.find(':');
                 if (colon == std::string::npos)
                     continue;
-                std::string k = detail::Trim(line.substr(0, colon));
+                std::string k = detail::Trim(line.substr(0, colon));    
                 std::string v = detail::Trim(line.substr(colon + 1));
                 req.headers.emplace(k, v);
             }
@@ -169,8 +330,89 @@ namespace http
         std::unordered_map<std::string, std::string> headers;
         std::string body;
 
-        void SetHeader(const std::string &k, const std::string &v) { headers[k] = v; }
+        // 设置响应头
+        void SetHeader(const std::string &k, const std::string &v)
+        {
+            headers[k] = v;
+        }
 
+        // 获取响应头
+        std::optional<std::string> GetHeader(const std::string &key) const
+        {
+            auto it = headers.find(key);
+            if (it != headers.end())
+                return it->second;
+            std::string lk = detail::ToLower(key);
+            for (const auto &p : headers)
+                if (detail::ToLower(p.first) == lk)
+                    return p.second;
+            return std::nullopt;
+        }
+
+        // 设置JSON响应（便捷方法）
+        void SetJsonBody(const std::string &json_str)
+        {
+            body = json_str;
+            SetHeader("Content-Type", "application/json; charset=utf-8");
+        }
+
+        // 设置HTML响应（便捷方法）
+        void SetHtmlBody(const std::string &html_str)
+        {
+            body = html_str;
+            SetHeader("Content-Type", "text/html; charset=utf-8");
+        }
+
+        // 设置纯文本响应（便捷方法）
+        void SetTextBody(const std::string &text_str)
+        {
+            body = text_str;
+            SetHeader("Content-Type", "text/plain; charset=utf-8");
+        }
+
+        // 生成简单的JSON响应对象 {"status": status, "msg": msg}
+        static Response JsonResponse(int status, const std::string &msg)
+        {
+            Response res;
+            res.status = status;
+            res.reason = (status == 200) ? "OK" : "Error";
+            std::string json = "{\"status\":" + std::to_string(status) + 
+                               ",\"msg\":\"" + detail::JsonEscape(msg) + "\"}";
+            res.SetJsonBody(json);
+            return res;
+        }
+
+        // 生成404响应
+        static Response NotFound()
+        {
+            Response res;
+            res.status = 404;
+            res.reason = "Not Found";
+            res.SetHtmlBody("<h1>404 Not Found</h1><p>The requested resource was not found.</p>");
+            return res;
+        }
+
+        // 生成400响应
+        static Response BadRequest(const std::string &msg = "Bad Request")
+        {
+            Response res;
+            res.status = 400;
+            res.reason = "Bad Request";
+            res.SetJsonBody("{\"status\":400,\"msg\":\"" + detail::JsonEscape(msg) + "\"}");
+            return res;
+        }
+
+        // 生成500响应
+        static Response InternalError(const std::string &msg = "Internal Server Error")
+        {
+            Response res;
+            res.status = 500;
+            res.reason = "Internal Server Error";
+            res.SetJsonBody("{\"status\":500,\"msg\":\"" + detail::JsonEscape(msg) + "\"}");
+            return res;
+        }
+
+        // 将Response序列化为HTTP文本格式
         std::string ToString() const
         {
             std::ostringstream oss;

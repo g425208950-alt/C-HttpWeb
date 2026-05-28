@@ -96,6 +96,7 @@ private:
 
             //分析一下逻辑：当有新的连接到来时，服务器会调用handler_来处理这个连接。为了避免阻塞主线程，服务器会为每个连接创建一个新的线程来处理它。处理完成后，线程会关闭客户端的文件描述符。
             ConnectionHandler h = handler_;
+            //判断handler_是否已经设置，如果没有设置，直接关闭客户端连接；如果已经设置，则创建一个新的线程来处理这个连接，并在处理完成后关闭客户端连接。
             if (h) {
                 std::thread([h, client_fd]() mutable {// mutable是因为传值拷贝默认const,function对象可能会因为找不到const operator()而无法调用，所以需要mutable。
                     h(client_fd); 
