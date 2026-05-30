@@ -3,6 +3,9 @@
 
 int main()
 {
+    // 消除行缓冲
+    std::cout.setf(std::ios::unitbuf);
+
     const int PORT = 8080;
 
     // 1. 初始化HTTP服务器实例，监听8080端口

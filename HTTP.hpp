@@ -10,7 +10,8 @@
 namespace http
 {
 
-    enum class Method
+    // Method represents the HTTP method of a request (e.g., GET, POST, etc.)
+    enum class Method 
     {
         GET,
         POST,
@@ -22,6 +23,8 @@ namespace http
         UNKNOWN
     };
 
+    // MethodToString converts a Method enum value to its corresponding string representation (e.g., Method::GET -> "GET").
+    // 什么时候需要把枚举转换成字符串？当你需要在日志、调试输出、HTTP响应头等地方以文本形式表示HTTP方法时，就需要这个函数。
     inline std::string MethodToString(Method m)
     {
         switch (m)
@@ -66,49 +69,65 @@ namespace http
 
     namespace detail
     {
-        inline std::string Trim(const std::string &s)
+        inline std::string_view TrimView(std::string_view s)
         {
-            size_t a = 0;
-            while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a])))
-                ++a;
-            size_t b = s.size();
-            while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1])))
-                --b;
-            return s.substr(a, b - a);
+            const std::string whitespaces = " \n\t\f\v\r";
+            size_t start = s.find_first_not_of(whitespaces);
+            if(start = std::string::npos)
+            {
+                return "";
+            }
+            size_t end = s.find_last_not_of(whitespaces);
+            s.remove_prefix(start);
+            s.remove_suffix(s.size() - (end + 1));
+
+            return s;
+        }
+
+        inline std::string Trim(const std::string s)
+        {
+            const std::string whitespaces = " \n\t\f\v\r";
+            size_t start = s.find_first_not_of(whitespaces);
+            if(start = std::string::npos)
+            {
+                return "";
+            }
+            size_t end = s.find_last_not_of(whitespaces);
+            std::string res = s.substr(start,end - start + 1);
+
+            return res;
         }
 
         inline std::string ToLower(std::string s)
         {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c)
-                           { return std::tolower(c); });
-            return s;
+            std::transform(s.begin(),s.end(),s.begin(),[](unsigned int c){return std::tolower(c)});
         }
 
         // URL解码：将%XX转换为原始字符
         inline std::string UrlDecode(const std::string &encoded)
         {
             std::string decoded;
-            for (size_t i = 0; i < encoded.length(); ++i)
+            for(size_t i = 0; i < encoded.size();i++)
             {
-                if (encoded[i] == '%' && i + 2 < encoded.length())
+                if(encoded[i] == '%' && i + 2 < encoded.size())
                 {
-                    std::string hex = encoded.substr(i + 1, 2);
+                    std::string hex = encoded.substr(i + 1,2);
                     try
                     {
-                        int val = std::stoi(hex, nullptr, 16);
+                        int val = std::stoi(hex,nullptr,16);
                         decoded += static_cast<char>(val);
                         i += 2;
                     }
-                    catch (...)
+                    catch(...)
                     {
                         decoded += encoded[i];
                     }
                 }
-                else if (encoded[i] == '+')
+                else if(encoded[i] == '+')
                 {
                     decoded += ' ';
                 }
-                else
+                else 
                 {
                     decoded += encoded[i];
                 }
@@ -146,7 +165,7 @@ namespace http
                 switch (c)
                 {
                 case '"':
-                    escaped += "\\\"";
+                    escaped += "\\\""; 
                     break;
                 case '\\':
                     escaped += "\\\\";
