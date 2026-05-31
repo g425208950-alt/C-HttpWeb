@@ -11,7 +11,7 @@ namespace http
 {
 
     // Method represents the HTTP method of a request (e.g., GET, POST, etc.)
-    enum class Method 
+    enum class Method
     {
         GET,
         POST,
@@ -73,7 +73,7 @@ namespace http
         {
             const std::string whitespaces = " \n\t\f\v\r";
             size_t start = s.find_first_not_of(whitespaces);
-            if(start = std::string::npos)
+            if (start = std::string::npos)
             {
                 return "";
             }
@@ -84,55 +84,80 @@ namespace http
             return s;
         }
 
+        std::optional<int> HexToDec(const char c)
+        {
+            if (c > '0' && c <= '9')
+            {
+                return c - '0';
+            }
+            else if (c > 'a' && c <= 'f')
+            {
+                return c - 'a';
+            }
+            else if (c > 'A' && c < 'F')
+            {
+                return c - 'A';
+            }
+            else
+            {
+                return std::nullopt;
+            }
+        }
+
         inline std::string Trim(const std::string s)
         {
             const std::string whitespaces = " \n\t\f\v\r";
             size_t start = s.find_first_not_of(whitespaces);
-            if(start = std::string::npos)
+            if (start = std::string::npos)
             {
                 return "";
             }
             size_t end = s.find_last_not_of(whitespaces);
-            std::string res = s.substr(start,end - start + 1);
+            std::string res = s.substr(start, end - start + 1);
 
             return res;
         }
 
         inline std::string ToLower(std::string s)
         {
-            std::transform(s.begin(),s.end(),s.begin(),[](unsigned int c){return std::tolower(c)});
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned int c)
+                           { return std::tolower(c); });
         }
 
         // URL解码：将%XX转换为原始字符
-        inline std::string UrlDecode(const std::string &encoded)
+        inline std::string UrlDecode(const std::string &encoded, bool quest_or_not)
         {
             std::string decoded;
-            for(size_t i = 0; i < encoded.size();i++)
+            for (size_t i = 0; i < encoded.size(); i++)
             {
-                if(encoded[i] == '%' && i + 2 < encoded.size())
+                if (encoded[i] == '%' && i + 2 < encoded.size())
                 {
-                    std::string hex = encoded.substr(i + 1,2);
-                    try
+                    std::string hex = encoded.substr(i + 1, 2);
+
+                    auto val_front = detail::HexToDec(encoded[i + 1]);
+                    auto val_behind = detail::HexToDec(encoded[i + 2]);
+
+                    if (val_front == std::nullopt || val_behind == std::nullopt)
                     {
-                        int val = std::stoi(hex,nullptr,16);
-                        decoded += static_cast<char>(val);
-                        i += 2;
-                    }
-                    catch(...)
-                    {
+                        // 这里可以改成返回 404 
                         decoded += encoded[i];
                     }
+                    else
+                    {
+                        decoded += static_cast<char>(*val_front * 16 + *val_behind);
+                        i += 2;
+                    }
                 }
-                else if(encoded[i] == '+')
+                else if (encoded[i] == '+' && quest_or_not == 1)
                 {
                     decoded += ' ';
                 }
-                else 
+                else
                 {
                     decoded += encoded[i];
                 }
             }
-            return decoded;
+            return decoded; 
         }
 
         // URL编码：将特殊字符转换为%XX
@@ -160,37 +185,43 @@ namespace http
         inline std::string JsonEscape(const std::string &str)
         {
             std::string escaped;
-            for (char c : str)
+            for (unsigned char c : str)
             {
                 switch (c)
                 {
                 case '"':
-                    escaped += "\\\""; 
+                    escaped += R"(\")";
                     break;
                 case '\\':
-                    escaped += "\\\\";
+                    escaped += R"(\\)";
                     break;
                 case '\b':
-                    escaped += "\\b";
+                    escaped += R"(\b)";
                     break;
                 case '\f':
-                    escaped += "\\f";
+                    escaped += R"(\f)";
                     break;
                 case '\n':
-                    escaped += "\\n";
+                    escaped += R"(\n)";
                     break;
                 case '\r':
-                    escaped += "\\r";
+                    escaped += R"(\r)";
                     break;
                 case '\t':
-                    escaped += "\\t";
+                    escaped += R"(\t)";
                     break;
                 default:
-                    if (static_cast<unsigned char>(c) < 0x20)
+                    if (c < 0x20)
                     {
-                        char buf[7];
-                        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        escaped += buf;
+                        static const char hex_digits[] = "0123456789abcdef"; 
+                        char buffer[5] = { 0 };
+                        buffer[0] = '0';
+                        buffer[1] = '0';
+                        buffer[2] = hex_digits[c >> 4];
+                        buffer[3] = hex_digits[c & 0x0f];
+                        buffer[4] = '\0';
+
+                        escaped = R"haha(\u)haha" + std::string(buffer);
                     }
                     else
                     {
@@ -212,7 +243,7 @@ namespace http
         std::unordered_map<std::string, std::string> headers;
         std::string body;
         mutable std::unordered_map<std::string, std::string> query_params; // 缓存的查询参数
-        mutable bool query_params_parsed_ = false; // 查询参数是否已解析
+        mutable bool query_params_parsed_ = false;                         // 查询参数是否已解析
 
         // 获取HTTP请求头，支持大小写不敏感的查找
         std::optional<std::string> GetHeader(const std::string &key) const
@@ -289,10 +320,10 @@ namespace http
 
         static std::optional<Request> Parse(const std::string &raw) // 为什么有static? 因为这个函数不依赖于Request的实例，可以直接通过Request::Parse来调用，而不需要先创建一个Request对象。
         {
-            Request req;    
+            Request req;
             size_t sep = raw.find("\r\n\r\n");
             std::string head = (sep == std::string::npos) ? raw : raw.substr(0, sep);
-            req.body = (sep == std::string::npos) ? std::string() : raw.substr(sep + 4); 
+            req.body = (sep == std::string::npos) ? std::string() : raw.substr(sep + 4);
 
             std::istringstream ss(head);
             std::string line;
@@ -332,7 +363,7 @@ namespace http
                 size_t colon = line.find(':');
                 if (colon == std::string::npos)
                     continue;
-                std::string k = detail::Trim(line.substr(0, colon));    
+                std::string k = detail::Trim(line.substr(0, colon));
                 std::string v = detail::Trim(line.substr(colon + 1));
                 req.headers.emplace(k, v);
             }
@@ -395,7 +426,7 @@ namespace http
             Response res;
             res.status = status;
             res.reason = (status == 200) ? "OK" : "Error";
-            std::string json = "{\"status\":" + std::to_string(status) + 
+            std::string json = "{\"status\":" + std::to_string(status) +
                                ",\"msg\":\"" + detail::JsonEscape(msg) + "\"}";
             res.SetJsonBody(json);
             return res;
