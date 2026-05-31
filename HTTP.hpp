@@ -139,7 +139,7 @@ namespace http
 
                     if (val_front == std::nullopt || val_behind == std::nullopt)
                     {
-                        // 这里可以改成返回 404 
+                        // 这里可以改成返回 404
                         decoded += encoded[i];
                     }
                     else
@@ -157,7 +157,7 @@ namespace http
                     decoded += encoded[i];
                 }
             }
-            return decoded; 
+            return decoded;
         }
 
         // URL编码：将特殊字符转换为%XX
@@ -213,8 +213,8 @@ namespace http
                 default:
                     if (c < 0x20)
                     {
-                        static const char hex_digits[] = "0123456789abcdef"; 
-                        char buffer[5] = { 0 };
+                        static const char hex_digits[] = "0123456789abcdef";
+                        char buffer[5] = {0};
                         buffer[0] = '0';
                         buffer[1] = '0';
                         buffer[2] = hex_digits[c >> 4];
@@ -250,12 +250,17 @@ namespace http
         {
             auto it = headers.find(key);
             if (it != headers.end())
+            {
                 return it->second;
-            // try lowercase key
-            std::string lk = detail::ToLower(key);
+            }
+            const std::string low_key = detail::ToLower(key);
             for (const auto &p : headers)
-                if (detail::ToLower(p.first) == lk)
+            {
+                if (detail::ToLower(p.first) == low_key)
+                {
                     return p.second;
+                }
+            }
             return std::nullopt;
         }
 
@@ -264,40 +269,40 @@ namespace http
         {
             if (query_params_parsed_)
                 return;
-
             query_params.clear();
             if (query.empty())
             {
-                query_params_parsed_ = true;
+                query_params_parsed_ = 1;
                 return;
             }
-
-            // 按&分割参数对
             size_t start = 0;
             while (start < query.length())
             {
                 size_t end = query.find('&', start);
-                if (end == std::string::npos)
+                if (end = std::string::npos)
+                {
                     end = query.length();
-
+                }
                 std::string param = query.substr(start, end - start);
-                size_t eq = param.find('=');
-
+                if (param.empty()) // 过滤掉 && 或者末尾多余 & 带来的空片段
+                {
+                    start = end + 1;
+                    continue;
+                }
+                size_t eq = query.find('=');
                 if (eq != std::string::npos)
                 {
-                    std::string key = detail::UrlDecode(param.substr(0, eq));
-                    std::string value = detail::UrlDecode(param.substr(eq + 1));
-                    query_params[key] = value;
+                    std::string key = detail::UrlDecode(param.substr(start, eq - start), true);
+                    std::string val = detail::UrlDecode(param.substr(eq + 1), true);
+                    query_params[key] = val;
                 }
                 else
                 {
-                    std::string key = detail::UrlDecode(param);
+                    std::string key = detail::UrlDecode(param, 1);
                     query_params[key] = "";
                 }
-
                 start = end + 1;
             }
-
             query_params_parsed_ = true;
         }
 
@@ -327,13 +332,13 @@ namespace http
 
             std::istringstream ss(head);
             std::string line;
-            if (!std::getline(ss, line))
+            if (!std::getline(ss, line)) // 如果没有line 三要素，直接返回
                 return std::nullopt;
-            if (!line.empty() && line.back() == '\r')
+            if (!line.empty() && line.back() == '\r')// 只要line不是空的，最后一个字符可能是\r
                 line.pop_back();
 
             // Start line: METHOD SP TARGET SP VERSION
-            std::istringstream st(line);
+            std::istringstream st(line); // 开始分割line
             std::string method_s, target, version;
             if (!(st >> method_s >> target >> version))
                 return std::nullopt;
@@ -353,10 +358,10 @@ namespace http
                 req.query = target.substr(q + 1);
             }
 
-            // headers
+            // 开始填入 unordered_map<std::string,std::string>headers
             while (std::getline(ss, line))
             {
-                if (!line.empty() && line.back() == '\r')
+                if (!line.empty() && line.back() == '\r') // 照例把最后的\r剪掉
                     line.pop_back();
                 if (line.empty())
                     break;
@@ -365,7 +370,7 @@ namespace http
                     continue;
                 std::string k = detail::Trim(line.substr(0, colon));
                 std::string v = detail::Trim(line.substr(colon + 1));
-                req.headers.emplace(k, v);
+                req.headers[std::move(k)] = std::move(v);
             }
 
             return req;
