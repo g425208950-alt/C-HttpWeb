@@ -73,7 +73,7 @@ namespace http
         {
             const std::string whitespaces = " \n\t\f\v\r";
             size_t start = s.find_first_not_of(whitespaces);
-            if (start = std::string::npos)
+            if (start == std::string::npos)
             {
                 return "";
             }
@@ -86,15 +86,15 @@ namespace http
 
         std::optional<int> HexToDec(const char c)
         {
-            if (c > '0' && c <= '9')
+            if (c >= '0' && c <= '9')
             {
                 return c - '0';
             }
-            else if (c > 'a' && c <= 'f')
+            else if (c >= 'a' && c <= 'f')
             {
                 return c - 'a';
             }
-            else if (c > 'A' && c < 'F')
+            else if (c >= 'A' && c <= 'F')
             {
                 return c - 'A';
             }
@@ -108,7 +108,7 @@ namespace http
         {
             const std::string whitespaces = " \n\t\f\v\r";
             size_t start = s.find_first_not_of(whitespaces);
-            if (start = std::string::npos)
+            if (start == std::string::npos)
             {
                 return "";
             }
@@ -122,6 +122,7 @@ namespace http
         {
             std::transform(s.begin(), s.end(), s.begin(), [](unsigned int c)
                            { return std::tolower(c); });
+            return s;
         }
 
         // URL解码：将%XX转换为原始字符
@@ -276,10 +277,10 @@ namespace http
                 return;
             }
             size_t start = 0;
-            while (start < query.length())
+            while (start < query.length()) // 检测start即可
             {
                 size_t end = query.find('&', start);
-                if (end = std::string::npos)
+                if (end == std::string::npos)
                 {
                     end = query.length();
                 }
@@ -312,7 +313,9 @@ namespace http
             ParseQueryParams();
             auto it = query_params.find(key);
             if (it != query_params.end())
+            {
                 return it->second;
+            }
             return std::nullopt;
         }
 
@@ -323,32 +326,53 @@ namespace http
             return query_params;
         }
 
-        static std::optional<Request> Parse(const std::string &raw) // 为什么有static? 因为这个函数不依赖于Request的实例，可以直接通过Request::Parse来调用，而不需要先创建一个Request对象。
+        static std::optional<Request> Parse(const std::string &raw)
         {
-            Request req;
             size_t sep = raw.find("\r\n\r\n");
-            std::string head = (sep == std::string::npos) ? raw : raw.substr(0, sep);
-            req.body = (sep == std::string::npos) ? std::string() : raw.substr(sep + 4);
+            // 如果连请求头结束标志都找不到，说明请求不完整
+            if (sep == std::string::npos)
+            {
+                return std::nullopt;
+            }
 
+            Request req;
+            std::string head = raw.substr(0, sep);
+            req.body = raw.substr(sep + 4);
+
+            if (head.empty())
+                return std::nullopt;
+
+            // 1. 把整个 head 放入流中
             std::istringstream ss(head);
             std::string line;
-            if (!std::getline(ss, line)) // 如果没有line 三要素，直接返回
-                return std::nullopt;
-            if (!line.empty() && line.back() == '\r')// 只要line不是空的，最后一个字符可能是\r
-                line.pop_back();
 
-            // Start line: METHOD SP TARGET SP VERSION
-            std::istringstream st(line); // 开始分割line
-            std::string method_s, target, version;
-            if (!(st >> method_s >> target >> version))
+            // 2. 读取第一行（请求行）
+            if (!std::getline(ss, line))
+            {
                 return std::nullopt;
+            }
+
+            // 清理第一行末尾可能存在的 \r
+            if (!line.empty() && line.back() == '\r')
+            {
+                line.pop_back();
+            }
+
+            // 3. 解析第一行的三个字段
+            std::istringstream line_ss(line);
+            std::string method_s, target, version;
+            if (!(line_ss >> method_s >> target >> version))
+            {
+                return std::nullopt;
+            }
+
             req.method = MethodFromString(method_s);
             req.method_str = method_s;
             req.version = version;
 
-            // split target into path and query
+            // 4. 解析 URL 中的 Path 和 Query
             size_t q = target.find('?');
-            if (q == std::string::npos)
+            if (std::string::npos == q)
             {
                 req.path = target;
             }
@@ -358,16 +382,22 @@ namespace http
                 req.query = target.substr(q + 1);
             }
 
-            // 开始填入 unordered_map<std::string,std::string>headers
+            // 5. 循环读取接下来的每一行（Headers）
             while (std::getline(ss, line))
             {
-                if (!line.empty() && line.back() == '\r') // 照例把最后的\r剪掉
+                if (!line.empty() && line.back() == '\r')
+                {
                     line.pop_back();
+                }
+
+                // 这里的 head 已经去掉了 \r\n\r\n，所以如果遇到空行，说明解析异常或结束
                 if (line.empty())
-                    break;
+                    continue;
+
                 size_t colon = line.find(':');
                 if (colon == std::string::npos)
-                    continue;
+                    continue; // 畸形行，跳过
+
                 std::string k = detail::Trim(line.substr(0, colon));
                 std::string v = detail::Trim(line.substr(colon + 1));
                 req.headers[std::move(k)] = std::move(v);
@@ -376,7 +406,6 @@ namespace http
             return req;
         }
     };
-
     struct Response
     {
         std::string version = "HTTP/1.1";
@@ -385,30 +414,35 @@ namespace http
         std::unordered_map<std::string, std::string> headers;
         std::string body;
 
-        // 设置响应头
-        void SetHeader(const std::string &k, const std::string &v)
+        void SetHeader(const std::string &k,const std::string& v)
         {
             headers[k] = v;
         }
 
         // 获取响应头
-        std::optional<std::string> GetHeader(const std::string &key) const
-        {
+        std::optional<std::string> GetHeader(const std::string &key) const{
             auto it = headers.find(key);
-            if (it != headers.end())
-                return it->second;
-            std::string lk = detail::ToLower(key);
-            for (const auto &p : headers)
-                if (detail::ToLower(p.first) == lk)
-                    return p.second;
-            return std::nullopt;
+            if(it != headers.end())
+            {
+                return it -> second;
+                std::string lk = detail::ToLower(key);
+                for(const auto &p : headers)
+                {
+                    if(detail::ToLower(p.first) == lk)
+                    {
+                        return p.second;
+                    }
+                }
+                return std::nullopt;
+            }
+            
         }
 
         // 设置JSON响应（便捷方法）
-        void SetJsonBody(const std::string &json_str)
+        void SetJsonBody(const std::string& json_str)
         {
             body = json_str;
-            SetHeader("Content-Type", "application/json; charset=utf-8");
+            SetHeader("Content-Type","application/json; charset=utf-8");
         }
 
         // 设置HTML响应（便捷方法）
@@ -468,18 +502,17 @@ namespace http
         }
 
         // 将Response序列化为HTTP文本格式
-        std::string ToString() const
-        {
+        std::string ToString() const{
             std::ostringstream oss;
             oss << version << " " << status << " " << reason << "\r\n";
             bool hasContentLength = false;
-            for (const auto &p : headers)
+            for(const auto &p : headers)
             {
-                if (detail::ToLower(p.first) == "content-length")
+                if(detail::ToLower(p.first) == "content_lenth")
                     hasContentLength = true;
                 oss << p.first << ": " << p.second << "\r\n";
             }
-            if (!hasContentLength)
+            if(!hasContentLength)
             {
                 oss << "Content-Length: " << body.size() << "\r\n";
             }

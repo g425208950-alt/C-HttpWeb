@@ -14,9 +14,9 @@ namespace http
     // 路由表项：包含方法、路径模式和处理器
     struct Route
     {
-        Method method;
+        Method method; 
         std::string path_pattern; // 支持精确匹配和正则表达式匹配
-        RouteHandler handler;
+        RouteHandler handler; 
         bool is_regex = false; // 是否使用正则表达式
     };
 
