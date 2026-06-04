@@ -1,9 +1,11 @@
 #pragma once
 
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
@@ -11,29 +13,26 @@
 #include <thread>
 #include <atomic>
 #include <string>
+#include <vector>
 
 class TCPServer {
 public:
     using ConnectionHandler = std::function<void(int)>; // handler receives accepted client fd
 
-    // Constructor takes the port number to listen on.
     explicit TCPServer(int port)
-        : port_(port), listen_fd_(-1), running_(false)
+        : port_(port), listen_fd_(-1), epoll_fd_(-1), running_(false)
     {}
 
-    // Destructor ensures the server is stopped and resources are cleaned up.
     ~TCPServer()
     {
         Stop();
     }
 
-    // Set the connection handler that will be invoked for each accepted connection.
     void SetConnectionHandler(ConnectionHandler handler)
     {
         handler_ = std::move(handler);
     }
 
-    // Start listening and accepting connections. Returns true on success.
     bool Start(int backlog = 10)
     {
         if (running_) return false;
@@ -61,16 +60,44 @@ public:
             return false;
         }
 
+        if (!MakeNonBlocking(listen_fd_)) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        epoll_fd_ = epoll_create1(0);
+        if (epoll_fd_ < 0) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        epoll_event event{};
+        event.events = EPOLLIN | EPOLLET;
+        event.data.fd = listen_fd_;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &event) < 0) {
+            ::close(epoll_fd_);
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            epoll_fd_ = -1;
+            return false;
+        }
+
         running_ = true;
-        accept_thread_ = std::thread(&TCPServer::AcceptLoop, this);
+        event_thread_ = std::thread(&TCPServer::EventLoop, this);
         return true;
     }
 
-    // Stop the server and join background threads.
     void Stop()
     {
         if (!running_) return;
         running_ = false;
+
+        if (epoll_fd_ >= 0) {
+            ::close(epoll_fd_);
+            epoll_fd_ = -1;
+        }
 
         if (listen_fd_ >= 0) {
             shutdown(listen_fd_, SHUT_RDWR);
@@ -78,40 +105,88 @@ public:
             listen_fd_ = -1;
         }
 
-        if (accept_thread_.joinable()) accept_thread_.join();
+        if (event_thread_.joinable()) event_thread_.join();
     }
 
 private:
-    void AcceptLoop()
+    static bool MakeNonBlocking(int fd)
     {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0) return false;
+        return fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0;
+    }
+
+    void EventLoop()
+    {
+        constexpr int kMaxEvents = 64; // 可以适当调大
+        std::vector<epoll_event> events(kMaxEvents);
+
         while (running_) {
-            sockaddr_in client_addr{};
-            socklen_t client_len = sizeof(client_addr);
-            int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
-            if (client_fd < 0) {
-                if (errno == EINTR) continue;   
-                if (!running_) break;
-                continue;
+            int n = epoll_wait(epoll_fd_, events.data(), kMaxEvents, 1000);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
             }
 
-            //分析一下逻辑：当有新的连接到来时，服务器会调用handler_来处理这个连接。为了避免阻塞主线程，服务器会为每个连接创建一个新的线程来处理它。处理完成后，线程会关闭客户端的文件描述符。
-            ConnectionHandler h = handler_;
-            //判断handler_是否已经设置，如果没有设置，直接关闭客户端连接；如果已经设置，则创建一个新的线程来处理这个连接，并在处理完成后关闭客户端连接。
-            if (h) {
-                std::thread([h, client_fd]() mutable {// mutable是因为传值拷贝默认const,function对象可能会因为找不到const operator()而无法调用，所以需要mutable。
-                    h(client_fd); 
-                    ::close(client_fd);
-                }).detach();
-            } else {
-                ::close(client_fd);
+            for (int i = 0; i < n; ++i) {
+                int fd = events[i].data.fd;
+                uint32_t revents = events[i].events;
+
+                // 1. 处理新连接接入 (listen_fd)
+                if (fd == listen_fd_) {
+                    while (true) {
+                        sockaddr_in client_addr{};
+                        socklen_t client_len = sizeof(client_addr);
+                        int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+                        
+                        if (client_fd < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 连干净了
+                            if (errno == EINTR) continue;
+                            break;
+                        }
+
+                        if (!MakeNonBlocking(client_fd)) {
+                            ::close(client_fd);
+                            continue;
+                        }
+
+                        // 🔥 【修复 Bug】：必须把新连进来的 client_fd 注册到 epoll 中！
+                        epoll_event ev{};
+                        ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT; // 加上 ONESHOT 防止多线程竞争
+                        ev.data.fd = client_fd;
+                        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
+                            ::close(client_fd);
+                        }
+                    }
+                } 
+                // 2. 处理已连接客户端的数据读写事件
+                else if (revents & EPOLLIN) {
+                    // 局部拷贝一份 handler，安全起见
+                    ConnectionHandler h = handler_; 
+                    if (h) {
+                        // 🔥 【优化隐患】：直接在当前线程同步处理，或者扔进你现有的线程池中。
+                        // 绝对不要每次都 std::thread(...).detach();
+                        h(fd); 
+                        
+                        // 注意：如果用了 EPOLLONESHOT，处理完业务后需要用 epoll_ctl 重置一下 fd，
+                        // 如果业务处理完了需要关闭连接，直接 close(fd) 即可，内核会自动将其从 epoll 中移除。
+                        ::close(fd); 
+                    } else {
+                        ::close(fd);
+                    }
+                }
+                // 3. 错误处理
+                else if (revents & (EPOLLERR | EPOLLHUP)) {
+                    ::close(fd);
+                }
             }
         }
     }
 
-    
-    int port_; // 端口号 
+    int port_; // 端口号
     int listen_fd_; // 监听套接字文件描述符
-    std::thread accept_thread_; // 接受连接的线程
+    int epoll_fd_; // epoll 实例文件描述符
+    std::thread event_thread_; // epoll 事件循环线程
     std::atomic<bool> running_; // 服务器运行状态
     ConnectionHandler handler_; // 连接处理器
 };
