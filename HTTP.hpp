@@ -84,27 +84,22 @@ namespace http
             return s;
         }
 
-        std::optional<int> HexToDec(const char c)
+        inline std::optional<int> HexToDec(const char c)
         {
             if (c >= '0' && c <= '9')
             {
                 return c - '0';
             }
-            else if (c >= 'a' && c <= 'f')
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F')
             {
-                return c - 'a';
+                return c - 'A' + 10;
             }
-            else if (c >= 'A' && c <= 'F')
-            {
-                return c - 'A';
-            }
-            else
-            {
-                return std::nullopt;
-            }
+            return std::nullopt;
         }
 
-        inline std::string Trim(const std::string s)
+        inline std::string Trim(const std::string& s)
         {
             const std::string whitespaces = " \n\t\f\v\r";
             size_t start = s.find_first_not_of(whitespaces);
@@ -133,7 +128,6 @@ namespace http
             {
                 if (encoded[i] == '%' && i + 2 < encoded.size())
                 {
-                    std::string hex = encoded.substr(i + 1, 2);
 
                     auto val_front = detail::HexToDec(encoded[i + 1]);
                     auto val_behind = detail::HexToDec(encoded[i + 2]);
