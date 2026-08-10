@@ -35,7 +35,7 @@ public:
         handler_ = std::move(handler);
     }
 
-    bool start(int backlog = 10)
+    bool Start(int backlog = 10)
     {
         if (running_ == true)
         {
@@ -97,7 +97,7 @@ public:
         }
 
         running_ = true;
-        event_thread_ = std::thread(&EventLoop, this);
+        event_thread_ = std::thread(&TCPServer::EventLoop, this);
         return true;
     }
 
@@ -215,7 +215,7 @@ private:
             }
         }
     }
-    
+
     int port_;                  // 端口号
     int listen_fd_;             // 监听套接字文件描述符
     int epoll_fd_;              // epoll 实例文件描述符

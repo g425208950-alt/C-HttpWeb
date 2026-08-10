@@ -4,8 +4,9 @@
 #include <unordered_map>
 #include <sstream>
 #include <optional>
-#include <algorithm>
-#include <cctype>
+#include <utility>
+
+#include "HttpDetail.hpp"
 
 namespace http
 {
@@ -67,167 +68,6 @@ namespace http
         return Method::UNKNOWN;
     }
 
-    namespace detail
-    {
-        inline std::string_view TrimView(std::string_view s)
-        {
-            const std::string whitespaces = " \n\t\f\v\r";
-            size_t start = s.find_first_not_of(whitespaces);
-            if (start == std::string::npos)
-            {
-                return "";
-            }
-            size_t end = s.find_last_not_of(whitespaces);
-            s.remove_prefix(start);
-            s.remove_suffix(s.size() - (end + 1));
-
-            return s;
-        }
-
-        inline std::optional<int> HexToDec(const char c)
-        {
-            if (c >= '0' && c <= '9')
-            {
-                return c - '0';
-            }
-            if (c >= 'a' && c <= 'f')
-                return c - 'a' + 10;
-            if (c >= 'A' && c <= 'F')
-            {
-                return c - 'A' + 10;
-            }
-            return std::nullopt;
-        }
-
-        inline std::string Trim(const std::string& s)
-        {
-            const std::string whitespaces = " \n\t\f\v\r";
-            size_t start = s.find_first_not_of(whitespaces);
-            if (start == std::string::npos)
-            {
-                return "";
-            }
-            size_t end = s.find_last_not_of(whitespaces);
-            std::string res = s.substr(start, end - start + 1);
-
-            return res;
-        }
-
-        inline std::string ToLower(std::string s)
-        {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned int c)
-                           { return std::tolower(c); });
-            return s;
-        }
-
-        // URL解码：将%XX转换为原始字符
-        inline std::string UrlDecode(const std::string &encoded, bool quest_or_not)
-        {
-            std::string decoded;
-            for (size_t i = 0; i < encoded.size(); i++)
-            {
-                if (encoded[i] == '%' && i + 2 < encoded.size())
-                {
-
-                    auto val_front = detail::HexToDec(encoded[i + 1]);
-                    auto val_behind = detail::HexToDec(encoded[i + 2]);
-
-                    if (val_front == std::nullopt || val_behind == std::nullopt)
-                    {
-                        // 这里可以改成返回 404
-                        decoded += encoded[i];
-                    }
-                    else
-                    {
-                        decoded += static_cast<char>(*val_front * 16 + *val_behind);
-                        i += 2;
-                    }
-                }
-                else if (encoded[i] == '+' && quest_or_not == 1)
-                {
-                    decoded += ' ';
-                }
-                else
-                {
-                    decoded += encoded[i];
-                }
-            }
-            return decoded;
-        }
-
-        // URL编码：将特殊字符转换为%XX
-        inline std::string UrlEncode(const std::string &str)
-        {
-            std::string encoded;
-            for (unsigned char c : str)
-            {
-                if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
-                {
-                    encoded += c;
-                }
-                else
-                {
-                    encoded += '%';
-                    char buf[3];
-                    snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned char>(c));
-                    encoded += buf;
-                }
-            }
-            return encoded;
-        }
-
-        // 简单的JSON转义
-        inline std::string JsonEscape(const std::string &str)
-        {
-            std::string escaped;
-            for (unsigned char c : str)
-            {
-                switch (c)
-                {
-                case '"':
-                    escaped += R"(\")";
-                    break;
-                case '\\':
-                    escaped += R"(\\)";
-                    break;
-                case '\b':
-                    escaped += R"(\b)";
-                    break;
-                case '\f':
-                    escaped += R"(\f)";
-                    break;
-                case '\n':
-                    escaped += R"(\n)";
-                    break;
-                case '\r':
-                    escaped += R"(\r)";
-                    break;
-                case '\t':
-                    escaped += R"(\t)";
-                    break;
-                default:
-                    if (c < 0x20)
-                    {
-                        static const char hex_digits[] = "0123456789abcdef";
-                        char buffer[5] = {0};
-                        buffer[0] = '0';
-                        buffer[1] = '0';
-                        buffer[2] = hex_digits[c >> 4];
-                        buffer[3] = hex_digits[c & 0x0f];
-                        buffer[4] = '\0';
-
-                        escaped = R"haha(\u)haha" + std::string(buffer);
-                    }
-                    else
-                    {
-                        escaped += c;
-                    }
-                }
-            }
-            return escaped;
-        }
-    }
-
     struct Request
     {
         Method method = Method::UNKNOWN;
@@ -284,10 +124,10 @@ namespace http
                     start = end + 1;
                     continue;
                 }
-                size_t eq = query.find('=');
+                size_t eq = param.find('=');
                 if (eq != std::string::npos)
                 {
-                    std::string key = detail::UrlDecode(param.substr(start, eq - start), true);
+                    std::string key = detail::UrlDecode(param.substr(0, eq), true);
                     std::string val = detail::UrlDecode(param.substr(eq + 1), true);
                     query_params[key] = val;
                 }
@@ -413,23 +253,24 @@ namespace http
             headers[k] = v;
         }
 
-        // 获取响应头
-        std::optional<std::string> GetHeader(const std::string &key) const{
+        // 获取响应头（大小写不敏感查找）
+        std::optional<std::string> GetHeader(const std::string &key) const
+        {
             auto it = headers.find(key);
-            if(it != headers.end())
+            if (it != headers.end())
             {
-                return it -> second;
-                std::string lk = detail::ToLower(key);
-                for(const auto &p : headers)
-                {
-                    if(detail::ToLower(p.first) == lk)
-                    {
-                        return p.second;
-                    }
-                }
-                return std::nullopt;
+                return it->second;
             }
-            
+            // 大小写不敏感兜底查找
+            std::string low_key = detail::ToLower(key);
+            for (const auto &p : headers)
+            {
+                if (detail::ToLower(p.first) == low_key)
+                {
+                    return p.second;
+                }
+            }
+            return std::nullopt;
         }
 
         // 设置JSON响应（便捷方法）
@@ -502,7 +343,7 @@ namespace http
             bool hasContentLength = false;
             for(const auto &p : headers)
             {
-                if(detail::ToLower(p.first) == "content_lenth")
+                if(detail::ToLower(p.first) == "content-length")
                     hasContentLength = true;
                 oss << p.first << ": " << p.second << "\r\n";
             }
