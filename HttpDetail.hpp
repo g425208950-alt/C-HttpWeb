@@ -182,7 +182,7 @@ namespace http
                         buffer[3] = hex_digits[c & 0x0f];
                         buffer[4] = '\0';
 
-                        escaped = R"haha(\u)haha" + std::string(buffer);
+                        escaped += R"haha(\u)haha" + std::string(buffer);
                     }
                     else
                     {
