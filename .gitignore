@@ -1,0 +1,12 @@
+# 构建产物
+Web.exe
+*.o
+*.out
+
+# 运行日志/调试快照
+*.log
+gitstatus.txt
+
+# 误产生的杂散文件（跟本项目无关）
+package.json
+package-lock.json
