@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <unordered_map>
 
 namespace http
 {
@@ -65,6 +66,25 @@ namespace http
             std::transform(s.begin(), s.end(), s.begin(), [](unsigned int c)
                            { return std::tolower(c); });
             return s;
+        }
+
+        // 在 header map 中按大小写不敏感的方式查找一个键（Request/Response 共用）
+        inline std::optional<std::string> FindHeaderCI(const std::unordered_map<std::string, std::string> &headers, const std::string &key)
+        {
+            auto it = headers.find(key);
+            if (it != headers.end())
+            {
+                return it->second;
+            }
+            const std::string low_key = ToLower(key);
+            for (const auto &p : headers)
+            {
+                if (ToLower(p.first) == low_key)
+                {
+                    return p.second;
+                }
+            }
+            return std::nullopt;
         }
 
         // URL解码：将 %XX 与 '+' 转换回原始字符

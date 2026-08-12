@@ -15,13 +15,16 @@
 #include <string>
 #include <vector>
 
+#include "ThreadPool.hpp"
+#include "ServerConfig.hpp"
+
 class TCPServer
 {
 public:
     using ConnectionHandler = std::function<void(int)>; // handler receives accepted client fd
 
-    explicit TCPServer(int port)
-        : port_(port), listen_fd_(-1), epoll_fd_(-1), running_(false)
+    explicit TCPServer(const ServerConfig &config)
+        : config_(config), listen_fd_(-1), epoll_fd_(-1), running_(false), pool_(config.worker_threads)
     {
     }
 
@@ -35,7 +38,7 @@ public:
         handler_ = std::move(handler);
     }
 
-    bool Start(int backlog = 10)
+    bool Start()
     {
         if (running_ == true)
         {
@@ -53,7 +56,7 @@ public:
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port_));
+        addr.sin_port = htons(static_cast<uint16_t>(config_.port));
         addr.sin_addr.s_addr = INADDR_ANY;
         if (bind(listen_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
         {
@@ -62,7 +65,7 @@ public:
             return false;
         }
 
-        if (listen(listen_fd_, backlog) < 0)
+        if (listen(listen_fd_, config_.backlog) < 0)
         {
             ::close(listen_fd_);
             listen_fd_ = -1;
@@ -122,6 +125,9 @@ public:
 
         if (event_thread_.joinable())
             event_thread_.join();
+
+        // 等待所有正在处理连接的 worker 线程收尾（连接自然结束或读超时后才会退出）
+        pool_.Stop();
     }
 
 private:
@@ -151,7 +157,6 @@ private:
             for (int i = 0; i < n; ++i)
             {
                 int fd = events[i].data.fd;
-                uint32_t revents = events[i].events;
 
                 // 1. 处理新连接接入 (listen_fd)
                 if (fd == listen_fd_)
@@ -177,49 +182,29 @@ private:
                             continue;
                         }
 
-                        // 🔥 【修复 Bug】：必须把新连进来的 client_fd 注册到 epoll 中！
-                        epoll_event ev{};
-                        ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT; // 加上 ONESHOT 防止多线程竞争
-                        ev.data.fd = client_fd;
-                        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev) < 0)
-                        {
-                            ::close(client_fd);
-                        }
+                        // 不再把 client_fd 挂进 epoll：交给线程池里的一个 worker 独占处理，
+                        // worker 用阻塞式（poll+recv）逻辑跑完这条连接的整个生命周期（可能是很多个
+                        // keep-alive 请求），accept 所在的这个事件循环线程绝不会被任何一条连接卡住。
+                        ConnectionHandler h = handler_;
+                        pool_.Enqueue([h, client_fd]()
+                                       {
+                            if (h)
+                            {
+                                h(client_fd);
+                            }
+                            ::close(client_fd); });
                     }
                 }
-                // 2. 处理已连接客户端的数据读写事件
-                else if (revents & EPOLLIN)
-                {
-                    // 局部拷贝一份 handler，安全起见
-                    ConnectionHandler h = handler_;
-                    if (h)
-                    {
-                        // 🔥 【优化隐患】：直接在当前线程同步处理，或者扔进你现有的线程池中。
-                        // 绝对不要每次都 std::thread(...).detach();
-                        h(fd);
-
-                        // 注意：如果用了 EPOLLONESHOT，处理完业务后需要用 epoll_ctl 重置一下 fd，
-                        // 如果业务处理完了需要关闭连接，直接 close(fd) 即可，内核会自动将其从 epoll 中移除。
-                        ::close(fd);
-                    }
-                    else
-                    {
-                        ::close(fd);
-                    }
-                }
-                // 3. 错误处理
-                else if (revents & (EPOLLERR | EPOLLHUP))
-                {
-                    ::close(fd);
-                }
+                // listen_fd_ 之外不会再收到别的事件（client_fd 已不注册进 epoll_fd_）
             }
         }
     }
 
-    int port_;                  // 端口号
+    ServerConfig config_;       // 服务器配置
     int listen_fd_;             // 监听套接字文件描述符
     int epoll_fd_;              // epoll 实例文件描述符
     std::thread event_thread_;  // epoll 事件循环线程
     std::atomic<bool> running_; // 服务器运行状态
     ConnectionHandler handler_; // 连接处理器
+    ThreadPool pool_;           // 处理连接的工作线程池
 };

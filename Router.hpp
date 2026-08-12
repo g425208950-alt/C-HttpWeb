@@ -14,10 +14,11 @@ namespace http
     // 路由表项：包含方法、路径模式和处理器
     struct Route
     {
-        Method method; 
+        Method method;
         std::string path_pattern; // 支持精确匹配和正则表达式匹配
-        RouteHandler handler; 
-        bool is_regex = false; // 是否使用正则表达式
+        RouteHandler handler;
+        bool is_regex = false;   // 是否使用正则表达式
+        std::regex compiled_regex; // is_regex为true时，注册阶段就编译好，避免每次请求重新编译
     };
 
     class Router
@@ -25,7 +26,7 @@ namespace http
     public:
         Router() = default;
 
-        // 注册一个精确路由
+        // 注册一个精确路由：用 "METHOD path" 做key存进unordered_map，Match时O(1)查找
         void Register(Method method, const std::string &path, RouteHandler handler)
         {
             Route r;
@@ -33,10 +34,11 @@ namespace http
             r.path_pattern = path;
             r.handler = handler;
             r.is_regex = false;
-            routes_.push_back(r);
+            exact_routes_[ExactKey(method, path)] = std::move(r);
         }
 
-        // 注册一个正则表达式路由
+        // 注册一个正则表达式路由：编译在注册阶段就完成一次，Match时直接复用，不再重复编译。
+        // 正则语法错误会在这里直接抛出std::regex_error，属于开发期就该发现的编程错误。
         void RegisterRegex(Method method, const std::string &pattern, RouteHandler handler)
         {
             Route r;
@@ -44,7 +46,8 @@ namespace http
             r.path_pattern = pattern;
             r.handler = handler;
             r.is_regex = true;
-            routes_.push_back(r);
+            r.compiled_regex = std::regex(pattern);
+            regex_routes_.push_back(std::move(r));
         }
 
         // 便捷方法：注册GET路由
@@ -75,35 +78,17 @@ namespace http
         // 返回值：std::optional<RouteHandler>，如果匹配成功则返回处理器，否则返回std::nullopt
         std::optional<RouteHandler> Match(const Request &req) const
         {
-            for (const auto &route : routes_)
+            // 精确匹配：O(1) 哈希查找，绝大多数请求走这条路
+            auto it = exact_routes_.find(ExactKey(req.method, req.path));
+            if (it != exact_routes_.end())
+                return it->second.handler;
+
+            // 正则路由数量通常很少，按注册顺序线性尝试，正则已在注册时编译好
+            for (const auto &route : regex_routes_)
             {
-                // 首先检查HTTP方法是否匹配
                 if (route.method != req.method)
                     continue;
-
-                // 检查路径是否匹配
-                bool path_matches = false;
-                if (route.is_regex)
-                {
-                    // 正则表达式匹配
-                    try
-                    {
-                        std::regex pattern(route.path_pattern);
-                        path_matches = std::regex_match(req.path, pattern);
-                    }
-                    catch (const std::exception &)
-                    {
-                        // 正则表达式有效性检查失败，跳过此路由
-                        continue;
-                    }
-                }
-                else
-                {
-                    // 精确匹配
-                    path_matches = (route.path_pattern == req.path);
-                }
-
-                if (path_matches)
+                if (std::regex_match(req.path, route.compiled_regex))
                     return route.handler;
             }
 
@@ -127,19 +112,27 @@ namespace http
         // 清空所有路由
         void Clear()
         {
-            routes_.clear();
+            exact_routes_.clear();
+            regex_routes_.clear();
             default_handler_ = nullptr;
         }
 
         // 获取已注册的路由数量
         size_t RouteCount() const
         {
-            return routes_.size();
+            return exact_routes_.size() + regex_routes_.size();
         }
 
     private:
-        std::vector<Route> routes_; // 存储所有注册的路由
-        RouteHandler default_handler_ = nullptr; // 默认处理器
+        // 精确路由的查找key："METHOD path"，同一方法+路径重复注册时后一次会覆盖前一次
+        static std::string ExactKey(Method method, const std::string &path)
+        {
+            return MethodToString(method) + " " + path;
+        }
+
+        std::unordered_map<std::string, Route> exact_routes_; // 精确匹配路由：O(1)查找
+        std::vector<Route> regex_routes_;                       // 正则匹配路由：按注册顺序线性尝试
+        RouteHandler default_handler_ = nullptr;                // 默认处理器
     };
 
 } // namespace http

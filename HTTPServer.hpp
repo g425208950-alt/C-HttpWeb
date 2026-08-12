@@ -3,10 +3,13 @@
 #include "TCPServer.hpp"
 #include "HTTP.hpp"
 #include "Router.hpp"
+#include "ServerConfig.hpp"
 #include <functional>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <string>
+#include <poll.h>
+#include <cerrno>
 
 namespace http
 {
@@ -15,8 +18,8 @@ namespace http
     public:
         using RequestHandler = std::function<Response(const Request &)>;
 
-        explicit HTTPServer(int port)
-            : server_(port)
+        explicit HTTPServer(const ServerConfig &config)
+            : config_(config), server_(config)
         {
             // 在HTTPServer的构造函数中，我们设置了TCPServer的连接处理器为HTTPServer的成员函数HandleClient。这样，每当TCPServer接受到一个新的连接时，都会调用HTTPServer的HandleClient来处理这个连接。
             server_.SetConnectionHandler([this](int client_fd)
@@ -35,9 +38,9 @@ namespace http
             handler_ = std::move(handler);
         }
 
-        bool Start(int backlog = 10)
+        bool Start()
         {
-            return server_.Start(backlog);
+            return server_.Start();
         }
 
         void Stop()
@@ -101,13 +104,47 @@ namespace http
 
                     // 蓄水池数据不够组成一个完整包，调用底层系统调用从网络读数据
                     ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
-                    if (bytes_received <= 0)
+                    if (bytes_received > 0)
                     {
-                        // 客户端优雅断开(0)或底层出错(-1)，由于是阻塞/同步多线程模型，直接释放连接
+                        // 拼接到蓄水池末尾
+                        receive_buffer.append(buffer, static_cast<size_t>(bytes_received));
+                        continue;
+                    }
+                    if (bytes_received == 0)
+                    {
+                        // 对端发来了 FIN，这才是真正的优雅断开
                         return;
                     }
-                    // 拼接到蓄水池末尾
-                    receive_buffer.append(buffer, static_cast<size_t>(bytes_received));
+                    // bytes_received < 0，client_fd 是非阻塞socket，必须区分 errno：
+                    // EAGAIN/EWOULDBLOCK 只代表"当前没数据"，不代表连接有问题（比如请求被拆成多个
+                    // TCP段还没收全，或者keep-alive连接正在空闲等待下一个请求）
+                    if (errno == EINTR)
+                    {
+                        continue; // 被信号打断，重试即可
+                    }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        // 用 poll 阻塞等待可读事件，避免忙轮询空耗CPU；同时设超时防止连接被永远挂起
+                        pollfd pfd{};
+                        pfd.fd = client_fd;
+                        pfd.events = POLLIN;
+                        int poll_ret = poll(&pfd, 1, config_.read_timeout_ms);
+                        if (poll_ret > 0)
+                        {
+                            continue; // 数据到了，回去重新 recv
+                        }
+                        if (poll_ret == 0)
+                        {
+                            return; // 等待超时：慢速/异常连接或keep-alive空闲超时，主动断开
+                        }
+                        if (errno == EINTR)
+                        {
+                            continue; // poll 被信号打断，重试
+                        }
+                        return; // poll 本身出错，放弃这条连接
+                    }
+                    // 其他 errno：真实的系统调用错误，连接不可用
+                    return;
                 }
 
                 // ================== 【步骤 2：精准裁剪边界】 ==================
@@ -178,6 +215,7 @@ namespace http
             send(client_fd, raw_response.c_str(), raw_response.size(), 0);
         }
 
+        ServerConfig config_;
         TCPServer server_;
         Router router_;
         RequestHandler handler_;

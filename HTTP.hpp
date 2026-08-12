@@ -83,20 +83,7 @@ namespace http
         // 获取HTTP请求头，支持大小写不敏感的查找
         std::optional<std::string> GetHeader(const std::string &key) const
         {
-            auto it = headers.find(key);
-            if (it != headers.end())
-            {
-                return it->second;
-            }
-            const std::string low_key = detail::ToLower(key);
-            for (const auto &p : headers)
-            {
-                if (detail::ToLower(p.first) == low_key)
-                {
-                    return p.second;
-                }
-            }
-            return std::nullopt;
+            return detail::FindHeaderCI(headers, key);
         }
 
         // 解析查询参数（URL中?后的部分）
@@ -256,21 +243,7 @@ namespace http
         // 获取响应头（大小写不敏感查找）
         std::optional<std::string> GetHeader(const std::string &key) const
         {
-            auto it = headers.find(key);
-            if (it != headers.end())
-            {
-                return it->second;
-            }
-            // 大小写不敏感兜底查找
-            std::string low_key = detail::ToLower(key);
-            for (const auto &p : headers)
-            {
-                if (detail::ToLower(p.first) == low_key)
-                {
-                    return p.second;
-                }
-            }
-            return std::nullopt;
+            return detail::FindHeaderCI(headers, key);
         }
 
         // 设置JSON响应（便捷方法）
