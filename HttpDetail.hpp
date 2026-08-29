@@ -36,7 +36,8 @@ namespace http
             {
                 return c - '0';
             }
-            if (c >= 'a' && c <= 'f')
+            if (c >= 'a' &&
+                 c <= 'f')
                 return c - 'a' + 10;
             if (c >= 'A' && c <= 'F')
             {

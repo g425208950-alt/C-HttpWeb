@@ -6,7 +6,7 @@ LDFLAGS := -pthread
 
 TARGET := Web.exe
 SOURCES := main.cpp
-HEADERS := HTTPServer.hpp HTTP.hpp TCPServer.hpp Router.hpp HttpDetail.hpp ThreadPool.hpp ServerConfig.hpp Routes.hpp
+HEADERS := HTTPServer.hpp HTTP.hpp TCPServer.hpp Router.hpp HttpDetail.hpp ServerConfig.hpp Routes.hpp
 
 all: $(TARGET)
 
