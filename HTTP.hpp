@@ -299,6 +299,16 @@ namespace http
             return res;
         }
 
+        // 生成413响应（请求体超过上限）
+        static Response PayloadTooLarge(const std::string &msg = "Payload Too Large")
+        {
+            Response res;
+            res.status = 413;
+            res.reason = "Payload Too Large";
+            res.SetJsonBody("{\"status\":413,\"msg\":\"" + detail::JsonEscape(msg) + "\"}");
+            return res;
+        }
+
         // 生成500响应
         static Response InternalError(const std::string &msg = "Internal Server Error")
         {

@@ -39,7 +39,8 @@ public:
         bool keep_alive = true;                     // 是否还能继续处理下一个请求
         bool closing = false;                       // 写完当前响应后即关闭连接
         bool epollout_registered = false;           // 当前是否已注册 EPOLLOUT
-        std::chrono::steady_clock::time_point last_active; // 最近一次有 I/O 活动的时间
+        std::chrono::steady_clock::time_point last_active;  // 最近一次有 I/O 活动的时间
+        std::chrono::steady_clock::time_point request_start; // 当前在途请求首字节到达时间（防 Slowloris）
     };
 
     // 业务层回调：收到数据后处理 recv_buf，可能向 send_buf 追加响应
@@ -210,7 +211,7 @@ private:
                     HandleWrite(fd);
             }
 
-            SweepIdle();
+            SweepTimers();
         }
     }
 
@@ -239,6 +240,7 @@ private:
             Connection &conn = connections_[client_fd];
             conn.fd = client_fd;
             conn.last_active = std::chrono::steady_clock::now();
+            conn.request_start = conn.last_active; // 占位初值，真正计时从首个请求字节到达起
 
             epoll_event event{};
             event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -258,7 +260,8 @@ private:
         if (it == connections_.end())
             return;
         Connection &conn = it->second;
-        conn.last_active = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        conn.last_active = now;
 
         char buffer[4096];
         bool peer_closed = false;
@@ -270,6 +273,10 @@ private:
             ssize_t r = recv(fd, buffer, sizeof(buffer), 0);
             if (r > 0)
             {
+                // 缓冲从空到非空 = 新请求的首字节到达，从这里起算请求总时限；
+                // 残留的半截请求（pipelining 未收完）不会重置，deadline 始终从真实起点算
+                if (conn.recv_buf.empty())
+                    conn.request_start = now;
                 conn.recv_buf.append(buffer, static_cast<size_t>(r));
                 continue;
             }
@@ -290,6 +297,20 @@ private:
         // 交给业务层：解析 recv_buf 中的完整请求并填 send_buf（支持 pipelining）
         if (!conn.recv_buf.empty() && on_readable_ && !conn.closing)
             on_readable_(conn);
+
+        // 写侧背压：客户端读得太慢导致待发响应积压超限，直接关闭，防止 send_buf 无界增长
+        if (conn.send_buf.size() - conn.send_offset > config_.max_pending_write)
+        {
+            CloseConnection(fd);
+            return;
+        }
+
+        // 传输层兜底：业务层消费后仍有超过「头部上限+body上限」的残留，属协议层也没拦住的畸形数据，防御性关闭
+        if (!conn.closing && conn.recv_buf.size() > config_.max_header_bytes + config_.max_body_bytes)
+        {
+            CloseConnection(fd);
+            return;
+        }
 
         // 业务层可能标记 closing（协议错误 / Connection: close），但还要等写完响应再关
         if (hard_error)
@@ -359,6 +380,12 @@ private:
         }
         else
         {
+            // 兜底：EAGAIN 卡住且待发量超限（读侧检查之外的另一道闸），关闭
+            if (conn.send_buf.size() - conn.send_offset > config_.max_pending_write)
+            {
+                CloseConnection(fd);
+                return;
+            }
             // 还有未发数据，确保 EPOLLOUT 已注册
             TryRegisterEpollOut(conn);
         }
@@ -388,18 +415,31 @@ private:
             conn.epollout_registered = false;
     }
 
-    // 粗粒度空闲扫描：替代原来 per-连接 poll(timeout) 阻塞等待
-    void SweepIdle()
+    // 粗粒度定时扫描（替代原来 per-连接 poll(timeout) 阻塞等待），双规则：
+    //   规则1：无在途请求（recv_buf 空）→ 按 last_active 算 keep-alive 空闲超时
+    //   规则2：有在途请求（recv_buf 非空）→ 按 request_start 算请求总时限。
+    //          Slowloris 每隔几秒滴 1 个字节能不断刷新 last_active，但刷不动 request_start，
+    //          请求永远凑不齐也会在 deadline 处被杀
+    void SweepTimers()
     {
         auto now = std::chrono::steady_clock::now();
-        auto timeout = std::chrono::milliseconds(config_.read_timeout_ms);
+        auto idle_timeout = std::chrono::milliseconds(config_.read_timeout_ms);
+        auto request_deadline = std::chrono::milliseconds(config_.request_deadline_ms);
 
         // 收集要关的 fd，避免边遍历边 erase
         std::vector<int> to_close;
         for (auto &p : connections_)
         {
-            if (now - p.second.last_active > timeout)
+            const Connection &conn = p.second;
+            if (!conn.recv_buf.empty())
+            {
+                if (now - conn.request_start > request_deadline)
+                    to_close.push_back(p.first);
+            }
+            else if (now - conn.last_active > idle_timeout)
+            {
                 to_close.push_back(p.first);
+            }
         }
         for (int fd : to_close)
             CloseConnection(fd);
